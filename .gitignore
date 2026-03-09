@@ -6,3 +6,4 @@ __pycache__/
 *.sqlite
 *.db
 .DS_Store
+desearch_dms.egg-info/

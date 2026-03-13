@@ -73,13 +73,15 @@ class Storage:
         self._conn.close()
 
     def _get_schema_version(self) -> int:
-        row = self._conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        row = self._conn.execute("SELECT version FROM schema_version WHERE single_row = 1 LIMIT 1").fetchone()
         if row is None:
             return -1
         return int(row["version"])
 
     def _set_schema_version(self, version: int) -> None:
-        self._conn.execute("INSERT OR REPLACE INTO schema_version(version) VALUES(?)", (version,))
+        self._conn.execute(
+            "INSERT OR REPLACE INTO schema_version(single_row, version) VALUES(1, ?)", (version,)
+        )
 
     def migrate(self) -> None:
         """Create tables if they don't exist and run pending migrations."""
@@ -133,8 +135,30 @@ class Storage:
 
         # Bootstrap schema_version for existing DBs: single row storing current version (0 = baseline).
         self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)"
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+              single_row INTEGER NOT NULL PRIMARY KEY CHECK (single_row = 1),
+              version INTEGER NOT NULL
+            )
+            """
         )
+        # Upgrade old schema_version table (version-only column) to single-row format if present.
+        info = self._conn.execute("PRAGMA table_info(schema_version)").fetchall()
+        columns = [r[1] for r in info]
+        if info and "single_row" not in columns:
+            max_ver = self._conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+            max_ver = 0 if max_ver is None else int(max_ver)
+            self._conn.execute("DROP TABLE schema_version")
+            self._conn.execute(
+                """
+                CREATE TABLE schema_version (
+                  single_row INTEGER NOT NULL PRIMARY KEY CHECK (single_row = 1),
+                  version INTEGER NOT NULL
+                )
+                """
+            )
+            self._set_schema_version(max_ver)
+            self._conn.commit()
         if self._get_schema_version() < 0:
             self._set_schema_version(0)
             self._conn.commit()

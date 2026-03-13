@@ -265,6 +265,7 @@ def test_run_send_returns_platform_message_id(storage, account_id):
     provider.send_message.return_value = "plat-msg-123"
 
     out = run_send(
+        account_id=account_id,
         storage=storage,
         provider=provider,
         recipient="bob",
@@ -284,6 +285,7 @@ def test_run_send_with_none_idempotency_key(storage, account_id):
     provider.send_message.return_value = "id-1"
 
     out = run_send(
+        account_id=account_id,
         storage=storage,
         provider=provider,
         recipient="alice",

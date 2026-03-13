@@ -95,15 +95,35 @@ def run_sync(
 
 
 def run_send(
+    account_id: int,
     storage: Storage,
     provider: LinkedInProvider,
     recipient: str,
     text: str,
     idempotency_key: str | None,
 ) -> str:
-    """Send one message via provider. Returns platform_message_id."""
-    return provider.send_message(
+    """Send one message via provider. Returns platform_message_id.
+
+    Persists the outbound message in storage for local archive (thread keyed by recipient).
+    """
+    platform_message_id = provider.send_message(
         recipient=recipient,
         text=text,
         idempotency_key=idempotency_key,
     )
+    thread_id = storage.upsert_thread(
+        account_id=account_id,
+        platform_thread_id=recipient,
+        title=None,
+    )
+    storage.insert_message(
+        account_id=account_id,
+        thread_id=thread_id,
+        platform_message_id=platform_message_id,
+        direction="out",
+        sender=None,
+        text=text,
+        sent_at=datetime.now(timezone.utc),
+        raw=None,
+    )
+    return platform_message_id

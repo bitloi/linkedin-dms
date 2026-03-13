@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Scripted test: run pytest for sync/send orchestration and API.
-# Requires: uv sync --extra dev (or pip install pytest) then run from repo root.
+# Scripted test: pytest + integration smoke. Run from repo root.
+# Requires: uv sync --extra dev (or pip install pytest httpx)
 set -e
 cd "$(dirname "$0")/.."
+run_pytest() {
+  if command -v uv >/dev/null 2>&1; then
+    uv run pytest tests/ -v --tb=short
+  else
+    python3 -m pytest tests/ -v --tb=short
+  fi
+}
+run_pytest
 if command -v uv >/dev/null 2>&1; then
-  uv run pytest tests/ -v --tb=short
+  uv run python scripts/integration_smoke.py
 else
-  python3 -m pytest tests/ -v --tb=short
+  python3 scripts/integration_smoke.py
 fi

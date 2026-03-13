@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .crypto import decrypt_if_encrypted, encrypt_if_configured
 from .models import AccountAuth, ProxyConfig
 
 
@@ -90,8 +91,8 @@ class Storage:
         proxy: Optional[ProxyConfig] = None,
     ) -> int:
         created_at = utcnow().isoformat()
-        auth_json = json.dumps(asdict(auth))
-        proxy_json = json.dumps(asdict(proxy)) if proxy else None
+        auth_json = encrypt_if_configured(json.dumps(asdict(auth)))
+        proxy_json = encrypt_if_configured(json.dumps(asdict(proxy))) if proxy else None
         cur = self._conn.execute(
             "INSERT INTO accounts(label, auth_json, proxy_json, created_at) VALUES (?, ?, ?, ?)",
             (label, auth_json, proxy_json, created_at),
@@ -103,7 +104,7 @@ class Storage:
         row = self._conn.execute("SELECT auth_json FROM accounts WHERE id=?", (account_id,)).fetchone()
         if not row:
             raise KeyError(f"account {account_id} not found")
-        d = json.loads(row["auth_json"])
+        d = json.loads(decrypt_if_encrypted(row["auth_json"]))
         return AccountAuth(**d)
 
     def get_account_proxy(self, account_id: int) -> Optional[ProxyConfig]:
@@ -112,7 +113,7 @@ class Storage:
             raise KeyError(f"account {account_id} not found")
         if not row["proxy_json"]:
             return None
-        d = json.loads(row["proxy_json"])
+        d = json.loads(decrypt_if_encrypted(row["proxy_json"]))
         return ProxyConfig(**d)
 
     def upsert_thread(self, *, account_id: int, platform_thread_id: str, title: Optional[str]) -> int:

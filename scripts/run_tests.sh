@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scripted test: pytest + integration smoke. Run from repo root.
-# Requires: uv sync --extra dev (or pip install pytest httpx)
+# Requires: uv sync --extra test (or pip install pytest httpx)
 set -e
 cd "$(dirname "$0")/.."
 run_pytest() {

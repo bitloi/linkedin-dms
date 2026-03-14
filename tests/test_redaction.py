@@ -27,6 +27,17 @@ class TestIssue12Acceptance:
         s = redact_string("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6")
         assert "eyJhbGc" not in s
         assert "Authorization: [REDACTED]" in s
+        # Full pipeline: SecretRedactingFilter scrubs AccountAuth dataclass in log args
+        filt = SecretRedactingFilter()
+        auth = AccountAuth(li_at="pipeline_secret", jsessionid="pipeline_jsession")
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="Auth: %s", args=(auth,), exc_info=None,
+        )
+        filt.filter(record)
+        rendered = str(record.args)
+        assert "pipeline_secret" not in rendered
+        assert "pipeline_jsession" not in rendered
 
 
 class TestRedactForLog:
@@ -135,6 +146,12 @@ class TestRedactString:
         """Authorization: Basic <credentials> must redact the entire value."""
         result = redact_string("Authorization: Basic dXNlcl9wYXNz")
         assert "dXNlcl9wYXNz" not in result
+        assert "Authorization: [REDACTED]" in result
+
+    def test_redacts_authorization_token_full_value(self):
+        """Authorization: Token <api_key> must redact the entire value."""
+        result = redact_string("Authorization: Token abc123secretkey")
+        assert "abc123secretkey" not in result
         assert "Authorization: [REDACTED]" in result
 
     def test_empty_string(self):

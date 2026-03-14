@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from libs.core.models import AccountAuth, ProxyConfig
 from libs.core.redaction import (
     SecretRedactingFilter,
     configure_logging,
@@ -32,10 +33,11 @@ class TestRedactForLog:
             "token": "secret",
             "api_key": "secret",
             "proxy_url": "http://proxy",
+            "url": "http://user:pass@host:8080",
             "safe_key": "visible",
         }
         result = redact_for_log(data)
-        for key in ("li_at", "jsessionid", "auth_json", "cookie", "password", "token", "api_key", "proxy_url"):
+        for key in ("li_at", "jsessionid", "auth_json", "cookie", "password", "token", "api_key", "proxy_url", "url"):
             assert result[key] == "[REDACTED]", f"{key} should be redacted"
         assert result["safe_key"] == "visible"
 
@@ -107,6 +109,18 @@ class TestRedactString:
         result = redact_string("LI_AT=secret_value")
         assert "secret_value" not in result
 
+    def test_redacts_authorization_bearer_full_value(self):
+        """Authorization: Bearer <token> must redact the entire token (not just 'Bearer')."""
+        result = redact_string("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6")
+        assert "eyJhbGc" not in result
+        assert "Authorization: [REDACTED]" in result
+
+    def test_redacts_authorization_basic_full_value(self):
+        """Authorization: Basic <credentials> must redact the entire value."""
+        result = redact_string("Authorization: Basic dXNlcl9wYXNz")
+        assert "dXNlcl9wYXNz" not in result
+        assert "Authorization: [REDACTED]" in result
+
     def test_empty_string(self):
         assert redact_string("") == ""
 
@@ -150,6 +164,28 @@ class TestSecretRedactingFilter:
         record = self._make_record("count: %d", (42,))
         filt.filter(record)
         assert record.args == (42,)
+
+    def test_scrubs_dataclass_args_account_auth(self):
+        """LogRecord with AccountAuth in args must redact li_at and jsessionid."""
+        filt = SecretRedactingFilter()
+        auth = AccountAuth(li_at="secret_li_at_val", jsessionid="secret_jsession_val")
+        record = self._make_record("Auth: %s", (auth,))
+        filt.filter(record)
+        rendered = str(record.args)
+        assert "secret_li_at_val" not in rendered
+        assert "secret_jsession_val" not in rendered
+        assert "[REDACTED]" in rendered
+
+    def test_scrubs_dataclass_args_proxy_config(self):
+        """LogRecord with ProxyConfig in args must redact url (proxy URL)."""
+        filt = SecretRedactingFilter()
+        proxy = ProxyConfig(url="http://user:secretpass@proxy.example:8080")
+        record = self._make_record("Proxy: %s", (proxy,))
+        filt.filter(record)
+        rendered = str(record.args)
+        assert "secretpass" not in rendered
+        assert "user:secretpass" not in rendered
+        assert "[REDACTED]" in rendered
 
 
 class TestConfigureLogging:

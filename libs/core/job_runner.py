@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider
 
+# Rate limit: delay between fetch_messages pages within a thread (issue #5, #7).
+DELAY_BETWEEN_PAGES_S = 1.5
+
 
 def _normalize_sent_at(dt: datetime) -> datetime:
     if dt.tzinfo is None:
@@ -85,7 +88,7 @@ def run_sync(
             storage.set_cursor(account_id=account_id, thread_id=thread_id, cursor=next_cursor)
             if next_cursor is None:
                 break
-            time.sleep(1.5)
+            time.sleep(DELAY_BETWEEN_PAGES_S)
             cursor = next_cursor
         synced_threads += 1
     return SyncResult(

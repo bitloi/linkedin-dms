@@ -3,12 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
 from libs.core.models import AccountAuth, ProxyConfig
 
 _VOYAGER_BASE = "https://www.linkedin.com/voyager/api"
+_VOYAGER_TIMEOUT_S = 30.0
+_EVENTS_PAGE_SIZE_MIN = 1
+_EVENTS_PAGE_SIZE_MAX = 500
 
 
 @dataclass(frozen=True)
@@ -101,7 +105,7 @@ class LinkedInProvider:
             sender_identifier = mini.get("publicIdentifier")
             if sender_identifier is None:
                 return None
-            direction = "out" if sender_identifier == my_profile_id else "in"
+            direction = "out" if str(sender_identifier).strip() == my_profile_id else "in"
         except (TypeError, AttributeError):
             return None
 
@@ -169,7 +173,15 @@ class LinkedInProvider:
         Returns:
           (messages, next_cursor). Messages in chronological order (oldest first).
           next_cursor is oldest message's createdAt ms if more pages exist, else None.
+
+        Raises:
+          ValueError: If limit is out of range (1..500) or JSESSIONID missing.
+          httpx.HTTPStatusError: On 4xx/5xx from LinkedIn (caller may retry or back off).
         """
+        if not (_EVENTS_PAGE_SIZE_MIN <= limit <= _EVENTS_PAGE_SIZE_MAX):
+            raise ValueError(
+                f"limit must be between {_EVENTS_PAGE_SIZE_MIN} and {_EVENTS_PAGE_SIZE_MAX}, got {limit}"
+            )
         params: dict[str, str | int] = {
             "keyVersion": "LEGACY_INBOX",
             "q": "events",
@@ -180,25 +192,39 @@ class LinkedInProvider:
 
         headers = self._build_headers()
         cookies = {"li_at": self.auth.li_at, "JSESSIONID": self.auth.jsessionid or ""}
-        url = f"{_VOYAGER_BASE}/messaging/conversations/{platform_thread_id}/events"
+        path_segment = quote(platform_thread_id, safe="")
+        url = f"{_VOYAGER_BASE}/messaging/conversations/{path_segment}/events"
 
-        with httpx.Client(proxy=self._proxy_url()) as client:
+        with httpx.Client(
+            proxy=self._proxy_url(),
+            timeout=_VOYAGER_TIMEOUT_S,
+        ) as client:
             my_profile_id = self._get_my_profile_id(client)
             resp = client.get(url, params=params, headers=headers, cookies=cookies)
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+
         raw_events = data.get("elements") or data.get("events") or []
         if not isinstance(raw_events, list):
             raw_events = []
 
         messages: list[LinkedInMessage] = []
         created_ats: list[int] = []
+        seen_ids: set[str] = set()
         for ev in raw_events:
             if not isinstance(ev, dict):
                 continue
             msg = self._parse_event_to_message(ev, my_profile_id)
             if msg is None:
                 continue
+            if msg.platform_message_id in seen_ids:
+                continue
+            seen_ids.add(msg.platform_message_id)
             messages.append(msg)
             try:
                 ca = ev.get("createdAt")
@@ -211,7 +237,8 @@ class LinkedInProvider:
         messages.sort(key=lambda m: m.sent_at)
         created_ats.sort()
 
-        if len(messages) < limit:
+        # Use raw_events count (API response size) for pagination; some events may be skipped as malformed.
+        if len(raw_events) < limit:
             next_cursor = None
         else:
             next_cursor = str(min(created_ats)) if created_ats else None

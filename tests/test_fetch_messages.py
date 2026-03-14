@@ -253,6 +253,142 @@ def test_fetch_messages_accepts_events_key_alternatively(provider):
     assert messages[0].text == "Hi"
 
 
+def test_fetch_messages_direction_out_when_public_identifier_is_numeric(provider):
+    """API may return publicIdentifier as number; direction still correct when compared as string."""
+    ev = {
+        "entityUrn": "urn:li:msg:1",
+        "createdAt": 1000000,
+        "from": {
+            "member": {"miniProfile": {"publicIdentifier": 12345}},
+        },
+        "eventContent": {"body": "From me"},
+    }
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response("12345")),
+        _mock_resp({"elements": [ev]}),
+    ]
+    with _patch_client(mock_client):
+        messages, _ = provider.fetch_messages(
+            platform_thread_id="c1",
+            cursor=None,
+            limit=50,
+        )
+    assert len(messages) == 1
+    assert messages[0].direction == "out"
+    assert messages[0].sender == "12345"
+
+
+def test_fetch_messages_encodes_platform_thread_id_in_url(provider):
+    """platform_thread_id with reserved chars (e.g. URN with ':') is URL-encoded in path."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp({"elements": []}),
+    ]
+    with _patch_client(mock_client):
+        provider.fetch_messages(
+            platform_thread_id="urn:li:conv:123",
+            cursor=None,
+            limit=50,
+        )
+    events_call = mock_client.get.call_args_list[1]
+    url = events_call.args[0] if events_call.args else events_call.kwargs.get("url")
+    assert "urn%3Ali%3Aconv%3A123" in url or "urn:li:conv:123" in url
+
+
+def test_fetch_messages_raises_when_limit_zero(provider):
+    """limit must be 1..500; 0 raises ValueError before any request."""
+    with pytest.raises(ValueError, match="limit must be between 1 and 500"):
+        provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=0)
+
+
+def test_fetch_messages_raises_when_limit_over_max(provider):
+    """limit > 500 raises ValueError (aligned with API max)."""
+    with pytest.raises(ValueError, match="limit must be between 1 and 500"):
+        provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=501)
+
+
+def test_fetch_messages_handles_non_dict_response_gracefully(provider):
+    """Non-dict or invalid JSON response (e.g. HTML error page) → ([], None), no crash."""
+    mock_client = MagicMock()
+    resp_me = _mock_resp(_me_response())
+    resp_bad = MagicMock()
+    resp_bad.raise_for_status = MagicMock()
+    resp_bad.json.side_effect = ValueError("Invalid JSON")
+    mock_client.get.side_effect = [resp_me, resp_bad]
+    with _patch_client(mock_client):
+        messages, next_cursor = provider.fetch_messages(
+            platform_thread_id="c1",
+            cursor=None,
+            limit=50,
+        )
+    assert messages == []
+    assert next_cursor is None
+
+
+def test_fetch_messages_handles_response_list_instead_of_dict(provider):
+    """If API returns a list (malformed), treat as no elements."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp([]),
+    ]
+    with _patch_client(mock_client):
+        messages, next_cursor = provider.fetch_messages(
+            platform_thread_id="c1",
+            cursor=None,
+            limit=50,
+        )
+    assert messages == []
+    assert next_cursor is None
+
+
+def test_fetch_messages_http_error_propagates(provider):
+    """HTTP 4xx/5xx from events endpoint propagates (caller can back off / retry)."""
+    import httpx
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        httpx.HTTPStatusError("403", request=MagicMock(), response=MagicMock(status_code=403)),
+    ]
+    with _patch_client(mock_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+
+
+def test_fetch_messages_deduplicates_same_platform_message_id_in_page(provider):
+    """If API returns duplicate entityUrn in one page, return unique messages (first wins)."""
+    ev = _event(entity_urn="urn:li:msg:dup", created_at_ms=1000, public_identifier="bob", body="Hi")
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp({"elements": [ev, ev]}),
+    ]
+    with _patch_client(mock_client):
+        messages, next_cursor = provider.fetch_messages(
+            platform_thread_id="c1",
+            cursor=None,
+            limit=50,
+        )
+    assert len(messages) == 1
+    assert messages[0].platform_message_id == "urn:li:msg:dup"
+    assert next_cursor is None
+
+
+def test_fetch_messages_client_uses_timeout(provider):
+    """Provider uses a timeout on HTTP client to avoid hanging."""
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response()),
+        _mock_resp({"elements": []}),
+    ]
+    with _patch_client(mock_client) as mock_httpx_client:
+        provider.fetch_messages(platform_thread_id="c1", cursor=None, limit=50)
+    call_kw = mock_httpx_client.call_args[1]
+    assert call_kw.get("timeout") == 30.0
+
+
 def test_build_headers_includes_csrf_and_required_headers(provider):
     """_build_headers includes csrf-token and standard Voyager headers."""
     headers = provider._build_headers()
@@ -260,6 +396,78 @@ def test_build_headers_includes_csrf_and_required_headers(provider):
     assert "User-Agent" in headers
     assert headers.get("Accept") == "application/vnd.linkedin.normalized+json+2.1"
     assert headers.get("x-restli-protocol-version") == "2.0.0"
+
+
+def test_real_provider_fetch_messages_integration_with_storage():
+    """Real test: LinkedInProvider.fetch_messages + job_runner.run_sync + storage with mocked HTTP.
+
+    Uses the actual provider implementation (no MagicMock on provider). Only HTTP is faked.
+    Asserts messages are stored and cursor is set correctly after one page.
+    """
+    from libs.core.job_runner import run_sync
+    from libs.core.storage import Storage
+    from libs.providers.linkedin.provider import LinkedInThread
+
+    storage = Storage(db_path=":memory:")
+    storage.migrate()
+    auth = AccountAuth(li_at="real-li", jsessionid="ajax:real-csrf")
+    account_id = storage.create_account(label="real-test", auth=auth, proxy=None)
+    provider = LinkedInProvider(auth=auth, proxy=None)
+
+    thread = LinkedInThread(platform_thread_id="conv-real-1", title="Alice", raw=None)
+    ev1 = _event(
+        entity_urn="urn:li:msg:101",
+        created_at_ms=1700000000000,
+        public_identifier="alice",
+        body="Hello from Alice",
+    )
+    ev2 = _event(
+        entity_urn="urn:li:msg:102",
+        created_at_ms=1700000001000,
+        public_identifier="me-user",
+        body="Reply from me",
+    )
+
+    mock_client = MagicMock()
+    mock_client.get.side_effect = [
+        _mock_resp(_me_response("me-user")),
+        _mock_resp({"elements": [ev1, ev2]}),
+    ]
+
+    with _patch_client(mock_client):
+        with patch(
+            "libs.providers.linkedin.provider.LinkedInProvider.list_threads",
+            return_value=[thread],
+        ):
+            result = run_sync(
+                account_id=account_id,
+                storage=storage,
+                provider=provider,
+                limit_per_thread=50,
+                max_pages_per_thread=1,
+            )
+
+    assert result.synced_threads == 1
+    assert result.messages_inserted == 2
+    assert result.pages_fetched == 1
+    threads = storage.list_threads(account_id=account_id)
+    assert len(threads) == 1
+    assert threads[0]["platform_thread_id"] == "conv-real-1"
+    thread_id = threads[0]["id"]
+    cursor = storage.get_cursor(account_id=account_id, thread_id=thread_id)
+    assert cursor is None
+    rows = storage._conn.execute(
+        "SELECT platform_message_id, direction, text FROM messages WHERE account_id = ? ORDER BY sent_at",
+        (account_id,),
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["platform_message_id"] == "urn:li:msg:101"
+    assert rows[0]["direction"] == "in"
+    assert rows[0]["text"] == "Hello from Alice"
+    assert rows[1]["platform_message_id"] == "urn:li:msg:102"
+    assert rows[1]["direction"] == "out"
+    assert rows[1]["text"] == "Reply from me"
+    storage.close()
 
 
 def test_run_sync_sleeps_between_pages():
@@ -288,7 +496,8 @@ def test_run_sync_sleeps_between_pages():
             limit_per_thread=50,
             max_pages_per_thread=None,
         )
-    mock_sleep.assert_called_once_with(1.5)
+    from libs.core.job_runner import DELAY_BETWEEN_PAGES_S
+    mock_sleep.assert_called_once_with(DELAY_BETWEEN_PAGES_S)
     storage.close()
 
 

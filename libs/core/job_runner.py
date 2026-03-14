@@ -4,6 +4,7 @@ Reusable by the API and future CLI. Aligned to provider and storage stubs.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from libs.core.storage import Storage
@@ -84,6 +85,7 @@ def run_sync(
             storage.set_cursor(account_id=account_id, thread_id=thread_id, cursor=next_cursor)
             if next_cursor is None:
                 break
+            time.sleep(1.5)
             cursor = next_cursor
         synced_threads += 1
     return SyncResult(

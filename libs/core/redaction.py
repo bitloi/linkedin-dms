@@ -103,7 +103,8 @@ class SecretRedactingFilter(logging.Filter):
     """Logging filter that scrubs secrets from log messages automatically.
 
     Attach to any handler or logger to ensure secrets never reach log output,
-    even when developers forget to call redact_for_log() manually.
+    even when developers forget to call redact_for_log() manually. Also redacts
+    dataclass instances in log args (e.g. AccountAuth) via asdict + redact_for_log.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:

@@ -13,6 +13,22 @@ from libs.core.redaction import (
 )
 
 
+class TestIssue12Acceptance:
+    """Issue #12 acceptance: unit test that redaction works for li_at, JSESSIONID, Authorization."""
+
+    def test_redaction_works(self):
+        """Redacts all three items required by issue #12: li_at, JSESSIONID, Authorization headers."""
+        # Structured data: li_at and JSESSIONID
+        out = redact_for_log({"li_at": "cookie_val", "jsessionid": "ajax:session123", "other": "ok"})
+        assert out["li_at"] == "[REDACTED]"
+        assert out["jsessionid"] == "[REDACTED]"
+        assert out["other"] == "ok"
+        # Inline string: Authorization header (full value, not just "Bearer")
+        s = redact_string("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6")
+        assert "eyJhbGc" not in s
+        assert "Authorization: [REDACTED]" in s
+
+
 class TestRedactForLog:
     def test_redacts_li_at(self):
         result = redact_for_log({"li_at": "secret_cookie", "label": "test"})

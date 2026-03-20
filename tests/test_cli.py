@@ -323,7 +323,9 @@ def test_cli_send_http_status_error_exits_one(cli_db_path: str, account_id: int)
     assert rc == 1
 
 
-def test_cli_send_not_implemented_exits_one(cli_db_path: str, account_id: int) -> None:
+def test_cli_send_not_implemented_exits_one(
+    capsys: pytest.CaptureFixture[str], cli_db_path: str, account_id: int
+) -> None:
     with patch.object(cli_main, "LinkedInProvider") as m_cls:
         inst = MagicMock()
         inst.send_message.side_effect = NotImplementedError
@@ -341,6 +343,16 @@ def test_cli_send_not_implemented_exits_one(cli_db_path: str, account_id: int) -
                 "t",
             ]
         )
+    assert rc == 1
+    assert cli_main._PROVIDER_TODO in capsys.readouterr().err
+
+
+def test_cli_unusable_db_path_exits_one(tmp_path: Path) -> None:
+    bad_dir = tmp_path / "not_a_sqlite_file"
+    bad_dir.mkdir()
+    rc = cli_main.main(
+        ["sync", "--account-id", "1", "--db-path", str(bad_dir)]
+    )
     assert rc == 1
 
 

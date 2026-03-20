@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -118,17 +119,24 @@ def _account_must_exist(storage: Storage, account_id: int) -> tuple[AccountAuth,
     return auth, proxy
 
 
-def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
+def _load_provider(storage: Storage, account_id: int) -> LinkedInProvider | int:
+    """Return a provider for ``account_id``, or exit code ``1`` on account errors."""
     try:
-        auth, proxy = _account_must_exist(storage, args.account_id)
+        auth, proxy = _account_must_exist(storage, account_id)
     except KeyError:
-        _stderr(f"error: account {args.account_id} not found")
+        _stderr(f"error: account {account_id} not found")
         return 1
     except ValueError as exc:
         _stderr(f"error: {exc}")
         return 1
+    return LinkedInProvider(auth=auth, proxy=proxy)
 
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+
+def _cmd_sync(storage: Storage, args: argparse.Namespace) -> int:
+    loaded = _load_provider(storage, args.account_id)
+    if isinstance(loaded, int):
+        return loaded
+    provider = loaded
     max_pages: int | None = args._resolved_max_pages  # type: ignore[attr-defined]
     try:
         result: SyncResult = run_sync(
@@ -175,16 +183,10 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
         _stderr("error: --idempotency-key, if provided, must be non-empty")
         return 1
 
-    try:
-        auth, proxy = _account_must_exist(storage, args.account_id)
-    except KeyError:
-        _stderr(f"error: account {args.account_id} not found")
-        return 1
-    except ValueError as exc:
-        _stderr(f"error: {exc}")
-        return 1
-
-    provider = LinkedInProvider(auth=auth, proxy=proxy)
+    loaded = _load_provider(storage, args.account_id)
+    if isinstance(loaded, int):
+        return loaded
+    provider = loaded
     try:
         platform_message_id = run_send(
             account_id=args.account_id,
@@ -197,13 +199,7 @@ def _cmd_send(storage: Storage, args: argparse.Namespace) -> int:
     except NotImplementedError:
         _stderr(_PROVIDER_TODO)
         return 1
-    except PermissionError as exc:
-        _stderr(f"error: {exc}")
-        return 1
-    except ConnectionError as exc:
-        _stderr(f"error: {exc}")
-        return 1
-    except RuntimeError as exc:
+    except (PermissionError, ConnectionError, RuntimeError) as exc:
         _stderr(f"error: {exc}")
         return 1
     except httpx.HTTPStatusError as exc:
@@ -230,9 +226,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         return int(code) if isinstance(code, int) else 1
 
-    storage = _open_storage(args.db_path)
+    storage: Storage | None = None
     try:
+        storage = _open_storage(args.db_path)
         storage.migrate()
+    except (OSError, sqlite3.Error):
+        logger.exception("storage initialization failed")
+        _stderr("error: could not open or initialize the database")
+        if storage is not None:
+            storage.close()
+        return 1
+
+    try:
         if args.command == "sync":
             return _cmd_sync(storage, args)
         if args.command == "send":

@@ -49,7 +49,8 @@ _MAX_PAGES = 50
 _DELAY_BETWEEN_PAGES_S = 1.5
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BASE_DELAY_S = 2.0
-_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_STATUS_CODES = frozenset({429, 999, 500, 502, 503, 504})
+_RATE_LIMIT_STATUS_CODES = frozenset({429, 999})
 _PLAYWRIGHT_NAV_RETRIES = 2
 
 # NOTE: These queryId hashes are extracted from LinkedIn's frontend JS bundle.
@@ -330,6 +331,7 @@ class LinkedInProvider:
         # send_message state (upstream)
         self._sent_keys: dict[str, str] = {}
         self._last_send_ts: float = 0.0
+        self.rate_limit_encountered: bool = False
         # GraphQL state
         self._client: Optional[httpx.Client] = None
         self._browser_cookies: Optional[dict[str, str]] = None
@@ -451,6 +453,13 @@ class LinkedInProvider:
         last_exc: Optional[httpx.HTTPStatusError] = None
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             resp = client.get(url, **kwargs)
+
+            # 401 → fail fast, session is dead.
+            if resp.status_code == 401:
+                raise PermissionError(
+                    "LinkedIn session expired (HTTP 401). Re-authenticate."
+                )
+
             if resp.status_code not in _RETRYABLE_STATUS_CODES:
                 return resp
             last_exc = httpx.HTTPStatusError(
@@ -458,19 +467,37 @@ class LinkedInProvider:
             )
             if attempt == _RETRY_MAX_ATTEMPTS - 1:
                 break
-            delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
-            if resp.status_code == 429:
+
+            is_rate_limit = resp.status_code in _RATE_LIMIT_STATUS_CODES
+            if is_rate_limit:
+                self.rate_limit_encountered = True
+                delay = min(
+                    _BACKOFF_START_S * (2 ** attempt), _BACKOFF_MAX_S,
+                )
+            else:
+                delay = _RETRY_BASE_DELAY_S * (2 ** attempt)
+
+            if is_rate_limit:
                 retry_after = resp.headers.get("Retry-After")
                 if retry_after:
                     try:
                         delay = max(delay, float(retry_after))
                     except (TypeError, ValueError):
                         pass
-            logger.debug(
-                "retry: %d from LinkedIn, attempt %d/%d in %.1fs",
-                resp.status_code, attempt + 1, _RETRY_MAX_ATTEMPTS, delay,
+
+            logger.warning(
+                "Rate-limit/retry: HTTP %d, account=%s, attempt %d/%d, backoff %.1fs",
+                resp.status_code,
+                "[redacted]",
+                attempt + 1,
+                _RETRY_MAX_ATTEMPTS,
+                delay,
             )
             time.sleep(delay)
+
+        # Final attempt also rate-limited — set the flag.
+        if last_exc is not None and last_exc.response.status_code in _RATE_LIMIT_STATUS_CODES:
+            self.rate_limit_encountered = True
         raise last_exc  # type: ignore[misc]
 
     def _is_cf_blocked(self, resp: httpx.Response) -> bool:
@@ -762,6 +789,7 @@ class LinkedInProvider:
                 continue
 
             if resp.status_code in (429, 999):
+                self.rate_limit_encountered = True
                 rate_limit_hits += 1
                 if rate_limit_hits > _MAX_RATE_LIMIT_RETRIES:
                     raise RuntimeError(

@@ -1,284 +1,204 @@
-# Desearch — LinkedIn DMs Sync
+# Desearch LinkedIn DMs
 
-This repository is for building a **community-driven LinkedIn Direct Messages sync service**.
+LinkedIn DMs is a Python service for storing LinkedIn messaging data in SQLite and exposing it through a small FastAPI API and CLI.
 
-The goal: given a user’s **LinkedIn** session (typically browser cookies) and (optionally) a proxy, the service should be able to:
+The current repository is no longer just a skeleton. It already includes:
+- account creation and cookie refresh endpoints
+- SQLite migrations and persistence for accounts, threads, messages, cursors, and outbound sends
+- a LinkedIn provider that can list threads, fetch messages, send messages, and perform a lightweight auth check
+- log and error redaction for sensitive fields such as `li_at`, `JSESSIONID`, proxy URLs, and tokens
 
-1. **Sync DM history** (fetch and store conversation history)
-2. **Send DMs** to specific users
+What is still true is that LinkedIn is a moving target. Some parts are implemented against private Voyager and GraphQL endpoints, so reliability depends on cookie validity, current LinkedIn query IDs, anti-bot responses, and optional Playwright cookie harvesting.
 
-We’re intentionally keeping the first version minimal, so contributors can plug in better scraping/playwright strategies, storage backends, and deployment options.
+## Repository layout
 
-## What we want to build (overview)
-
-### Core capabilities
-
-#### 1) Sync DM history
-- Accept an authenticated **LinkedIn** session (typically **browser cookies**; optionally username/password if someone implements it safely)
-- Optional **per-account proxy** (may be required depending on usage/location)
-- Discover DM conversations/threads
-- Fetch message history per conversation
-- Persist messages in a normalized format (DB)
-- Incremental sync (only fetch new messages after last checkpoint)
-
-#### 2) Send DMs
-- Send a DM to a specific recipient/profile
-- Support idempotency / retries
-- Record outbound message status
-
-### Constraints / reality
-- LinkedIn has strong anti-automation protections and frequent UI changes.
-- Cookie-based sessions can expire and may trigger security challenges.
-- Rate limiting, careful request patterns, and good operational hygiene are mandatory.
-
-This repo is **NOT** about bypassing security challenges or breaking laws/terms. It’s about building a robust, opt-in syncing tool for accounts you own or have explicit permission to access.
-
-## Non-goals
-- Account takeover or credential harvesting
-- Circumventing CAPTCHAs / 2FA / device challenges
-- Mass spam / unsolicited messaging
-
-## Proposed architecture
-
-### Components
-- **Worker**: does the actual sync/send actions for one account
-- **API service**: manages accounts, schedules syncs, exposes endpoints
-- **Storage**: database for accounts, conversations, messages, sync cursors
-
-### Data model (suggested)
-- `Account`: handle, cookies blob reference, proxy config, last sync time
-- `Conversation`: conversation id, participants
-- `Message`: message id, conversation id, sender id, text, media refs, timestamp
-- `SyncCursor`: per conversation cursor/watermark for incremental sync
-
-### Interfaces
-- **Provider abstraction** (recommended):
-  - `providers/linkedin/` implements LinkedIn-specific logic
-  - Later we can add other providers as needed.
-
-## MVP scope (what we want first)
-
-1. A minimal Python service skeleton
-2. A provider interface with placeholder LinkedIn implementation
-3. A simple storage layer (SQLite first)
-4. CLI commands:
-   - `sync` (fetch conversations + messages)
-   - `send` (send DM)
-
-Contributors can then replace the provider implementation with:
-- browser automation (Playwright)
-- network scraping (session cookies + HTTP)
-- official APIs (if and when possible)
-
-## Repo layout (planned)
-
-```
+```text
 .
 ├─ apps/
-│  └─ api/                 # FastAPI service
+│  ├─ api/                 # FastAPI application
+│  └─ cli/                 # CLI entrypoint for sync/send without uvicorn
 ├─ libs/
-│  ├─ core/                # shared models, storage, config
+│  ├─ core/                # models, storage, crypto, cookie parsing, redaction, job orchestration
 │  └─ providers/
-│     └─ linkedin/         # LinkedIn provider (placeholder)
+│     └─ linkedin/         # LinkedIn-specific HTTP + Playwright-assisted provider
+├─ docs/
+│  ├─ architecture.md
+│  ├─ features.md
+│  └─ known-issues.md
 ├─ scripts/
-├─ tests/
-└─ docs/
+└─ tests/
 ```
 
-## Getting started (for contributors)
+## Requirements
 
-This repo uses **Python 3.11+** and a minimal dependency set.
+- Python 3.11+
+- SQLite, stored in `./desearch_linkedin_dms.sqlite` by default
+- `li_at` cookie for every account
+- `JSESSIONID` for Voyager/GraphQL endpoints used by thread listing and message fetch
+- optional Playwright when LinkedIn or Cloudflare blocks cookie-only GraphQL access
 
-### Setup
+## Installation
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-### Run the API (FastAPI)
+Optional browser support for Cloudflare cookie harvesting:
+
+```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
+Optional at-rest encryption for stored auth and proxy payloads:
+
+```bash
+export DESEARCH_ENCRYPTION_KEY="$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")"
+```
+
+If `DESEARCH_ENCRYPTION_KEY` is not set, the app still works, but auth and proxy JSON are stored in plaintext and the process logs a one-time warning.
+
+## Running the API
+
 ```bash
 uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8899
 ```
 
-### CLI (no web server)
+Useful endpoints:
+- `GET /health`
+- `POST /accounts`
+- `POST /accounts/refresh`
+- `GET /auth/check?account_id=1`
+- `GET /threads?account_id=1`
+- `POST /sync`
+- `POST /send`
+- `GET /sends?account_id=1`
 
-Use the same SQLite database and provider stack as the API, without uvicorn:
+Swagger UI is available at <http://127.0.0.1:8899/docs>.
+
+## Running the CLI
+
+The CLI uses the same storage and provider stack as the API.
 
 ```bash
 python -m apps.cli sync --account-id 1
-python -m apps.cli send --account-id 1 --recipient 'urn:li:fsd_profile:…' --text 'Hello'
+python -m apps.cli send --account-id 1 --recipient 'urn:li:fsd_profile:123' --text 'Hello'
 ```
 
-Optional: `--db-path /path/to/desearch_linkedin_dms.sqlite` on each subcommand. Sync also accepts `--limit-per-thread`, `--max-pages-per-thread`, and `--exhaust-pagination` (same semantics as `POST /sync`). Send accepts `--idempotency-key`.
+Useful sync options:
+- `--db-path PATH`
+- `--limit-per-thread N`
+- `--max-pages-per-thread N`
+- `--exhaust-pagination`
+- `--delay-threads SEC`
+- `--delay-pages SEC`
 
-If the provider raises `NotImplementedError` (for example sync before thread listing is implemented), the CLI prints a short TODO pointing at `libs/providers/linkedin/provider.py` and exits with a non-zero status.
+Useful send option:
+- `--idempotency-key KEY`
 
-Open:
-- Health: http://127.0.0.1:8899/health
-- Swagger UI: http://127.0.0.1:8899/docs
+## Account authentication input
 
-### Quick test with curl (no real cookies)
-> This only verifies the API + SQLite wiring. Provider methods are still TODO.
+`POST /accounts` and `POST /accounts/refresh` accept either:
+- explicit `li_at` and optional `jsessionid`
+- a `cookies` field containing either a raw cookie header string or a JSON cookie export
 
-1) Create an account (DO NOT use real cookies in public logs)
+Examples:
+
 ```bash
 curl -s -X POST http://127.0.0.1:8899/accounts \
   -H 'Content-Type: application/json' \
-  -d '{"label":"test","li_at":"REDACTED","jsessionid":null,"proxy_url":null}'
+  -d '{"label":"sales-1","li_at":"REDACTED","jsessionid":"ajax:REDACTED"}'
 ```
 
-2) List threads (will be empty until provider is implemented)
-```bash
-curl -s 'http://127.0.0.1:8899/threads?account_id=1'
-```
-
-3) Trigger sync (currently returns a note until provider is implemented)
-```bash
-curl -s -X POST http://127.0.0.1:8899/sync \
-  -H 'Content-Type: application/json' \
-  -d '{"account_id":1,"limit_per_thread":50}'
-```
-
-## LinkedIn cookies
-
-This service currently accepts LinkedIn session cookies for account authentication.
-
-### Required
-- `li_at`: the primary LinkedIn session cookie
-
-### Optional
-- `JSESSIONID`: may be needed later for provider requests that require CSRF-related headers
-
-### Notes
-- Treat both values as secrets
-- Do not commit them into git
-- Do not paste real cookie values into public issues, logs, or screenshots
-
-### Example account creation
 ```bash
 curl -s -X POST http://127.0.0.1:8899/accounts \
   -H 'Content-Type: application/json' \
-  -d '{"label":"test","li_at":"REDACTED","jsessionid":"REDACTED","proxy_url":null}'
+  -d '{"label":"sales-1","cookies":"li_at=REDACTED; JSESSIONID=ajax:REDACTED"}'
 ```
-  
-### Verify session
 
-After creating an account, you can quickly verify that the stored cookies look valid using the auth check endpoint.
+Refresh an existing account without recreating it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8899/accounts/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"account_id":1,"cookies":"li_at=REDACTED; JSESSIONID=ajax:REDACTED"}'
+```
+
+Quick auth sanity check:
 
 ```bash
 curl -s 'http://127.0.0.1:8899/auth/check?account_id=1'
 ```
 
-### Example success response:
+## Sync behavior
+
+`POST /sync` and `python -m apps.cli sync` both call `libs.core.job_runner.run_sync()`.
+
+Current behavior:
+- loads account auth and optional proxy from storage
+- calls `LinkedInProvider.list_threads()`
+- upserts each thread into SQLite
+- fetches messages page by page with cursor support
+- inserts only new messages, counting duplicate skips separately
+- stores the latest cursor in `sync_cursors`
+- sleeps between threads and pages to reduce rate-limit pressure
+- returns summary counts including `rate_limited`
+
+Default API sync payload:
+
 ```json
 {
-  "status": "ok",
-  "error": null
+  "account_id": 1,
+  "limit_per_thread": 50,
+  "max_pages_per_thread": 1,
+  "delay_between_threads_s": 2.0,
+  "delay_between_pages_s": 1.5
 }
 ```
 
-### Important note: SQLite + FastAPI threads
-FastAPI runs normal `def` endpoints inside a threadpool. SQLite connections are thread-bound by default.
+Set `max_pages_per_thread` to `null` in the API or pass `--exhaust-pagination` in the CLI to keep following cursors until exhaustion.
 
-For MVP simplicity we open the connection with `check_same_thread=False`.
-If you later add concurrency/background workers, consider using one connection per request or a pool.
+## Send behavior
 
-## How to contribute
+`POST /send` and `python -m apps.cli send` both call `libs.core.job_runner.run_send()`.
 
-- Pick an issue and comment that you’re working on it.
-- Keep PRs small and focused.
-- Add tests where possible.
+Current behavior:
+- creates or reuses an outbound send record before calling LinkedIn
+- enforces idempotency through the `outbound_sends` table when a key is provided
+- retries transient network errors and backs off on rate limiting
+- stores successful outbound messages in both `outbound_sends` and `messages`
+- exposes historical send records through `GET /sends`
 
-## Security & privacy
+## Storage summary
 
-Cookies and session tokens are extremely sensitive.
+The SQLite database currently contains these tables:
+- `accounts`
+- `threads`
+- `messages`
+- `sync_cursors`
+- `schema_version`
+- `outbound_sends`
 
-**Do not** commit real cookies or credentials.
+Migrations also add message direction constraints and useful indexes.
 
-When implementing account auth handling:
-- Encrypt cookies at rest
-- Support secret managers via env vars
-- Add redaction in logs
+## Security notes
 
-## Safe logging rules
+The codebase already includes several concrete protections:
+- `AccountAuth`, `ProxyConfig`, and `LinkedInProvider` redact their own string representations
+- `configure_logging()` installs `SecretRedactingFilter` on the root logger
+- `redact_string()` and `redact_for_log()` sanitize logs, dict payloads, and exception text
+- API validation and `HTTPException` detail strings pass through redaction helpers before returning to clients
+- optional Fernet encryption protects stored auth and proxy JSON at rest
 
-The service uses a **defense-in-depth** approach to prevent secrets from leaking
-into logs, HTTP responses, or tracebacks. Three layers work together:
+Even with those safeguards:
+- do not commit real cookies
+- do not paste real cookies into issue trackers or logs
+- treat `li_at`, `JSESSIONID`, proxy URLs, and any exported cookie bundle as secrets
 
-### Layer 1 — Source-level (`__repr__` overrides)
+## What to read next
 
-`AccountAuth`, `ProxyConfig`, and `LinkedInProvider` override `__repr__` and
-`__str__` so secrets are never exposed through `print()`, f-strings, tracebacks,
-or any other string conversion — even without the logging filter.
-
-```python
->>> repr(AccountAuth(li_at="secret", jsessionid="ajax:tok"))
-"AccountAuth(li_at='[REDACTED]', jsessionid='[REDACTED]')"
-```
-
-### Layer 2 — Filter-level (`SecretRedactingFilter`)
-
-`configure_logging()` (called automatically in `apps/api/main.py`) installs a
-`SecretRedactingFilter` on the root logger. Every log record passes through it
-before being emitted — no manual opt-in required per call site. The filter scrubs:
-
-- **Message strings** via `redact_string()` (inline patterns)
-- **Structured args** (dicts) via `redact_for_log()`
-- **Dataclass args** (e.g. `AccountAuth`) via `dataclasses.asdict()` + redaction
-- **Exception tracebacks** (`exc_text` and `exc_info`) to catch secrets in stack traces
-
-### Layer 3 — API-level (HTTP response sanitization)
-
-All `HTTPException` detail strings in `apps/api/main.py` are passed through
-`redact_string()` before being returned to clients, preventing secrets from
-leaking through error responses.
-
-### Redacted keys (structured data)
-
-When logging dicts or request bodies, wrap them with `redact_for_log()`:
-
-```python
-from libs.core.redaction import redact_for_log
-
-logger.info("Account created: %s", redact_for_log({"account_id": 1, "li_at": "SECRET"}))
-# → Account created: {'account_id': 1, 'li_at': '[REDACTED]'}
-```
-
-The following dict keys are always redacted (case-insensitive):
-`li_at`, `jsessionid`, `auth_json`, `cookie`, `cookies`, `authorization`,
-`password`, `secret`, `token`, `api_key`, `apikey`, `proxy_url`, `url`
-
-### Redacted patterns (inline strings)
-
-Inline secrets in log message strings are scrubbed by `redact_string()` and
-automatically by the logging filter. Examples of patterns that get redacted:
-
-```
-li_at=SECRETVALUE                →  li_at=[REDACTED]
-JSESSIONID: ajax:csrf123         →  JSESSIONID: [REDACTED]
-Authorization: Bearer eyJhbGc    →  Authorization: [REDACTED]
-Authorization=Basic dXNlcjpw     →  Authorization=[REDACTED]
-password=hunter2                 →  password=[REDACTED]
-proxy_url=http://u:p@host:8080   →  proxy_url=[REDACTED]
-```
-
-### Rules for contributors
-
-1. **Never log raw `AccountAuth` objects** — always pass through `redact_for_log()` first.
-2. **Never log raw cookie strings** — use `redact_string()` or rely on the filter.
-3. **Never log request bodies verbatim** — extract only the non-sensitive fields.
-4. **Do not disable the logging filter** — `configure_logging()` must remain in `main.py`.
-5. **Do not add `li_at` / `jsessionid` to error messages** — use account_id instead.
-6. **Always override `__repr__`** on any new dataclass that holds secrets.
-
-## Roadmap
-
-- [ ] MVP skeleton: FastAPI + SQLite + provider interface
-- [ ] LinkedIn provider: conversation discovery + incremental sync (TBD)
-- [ ] LinkedIn provider: send DM (TBD)
-- [ ] Proxy + per-account rate limiting
-
----
-
-If you want to help, start with the issues in this repo.
+- `docs/features.md` for implementation status by feature
+- `docs/architecture.md` for component and request flow details
+- `docs/known-issues.md` for sharp edges and operational caveats

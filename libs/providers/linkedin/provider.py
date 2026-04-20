@@ -351,14 +351,48 @@ class LinkedInProvider:
         self._browser_cookies: Optional[dict[str, str]] = None
         self._profile_id: Optional[str] = None
         self._profile_id_fetched: bool = False
+        # Per-request overrides for browser-captured headers (issue #54).
+        # Take precedence over AccountAuth values when set.
+        self._runtime_x_li_track: Optional[str] = None
+        self._runtime_csrf_token: Optional[str] = None
+
+    def update_browser_context(
+        self,
+        *,
+        x_li_track: Optional[str] = None,
+        csrf_token: Optional[str] = None,
+    ) -> None:
+        """Override browser-captured headers for the next network calls.
+
+        Non-empty values replace the corresponding field; None/empty is ignored
+        so partial captures never clobber previously-set overrides.
+        """
+        if x_li_track and x_li_track.strip():
+            self._runtime_x_li_track = x_li_track.strip()
+        if csrf_token and csrf_token.strip():
+            self._runtime_csrf_token = csrf_token.strip()
+
+    def _effective_x_li_track(self, default: str) -> str:
+        return self._runtime_x_li_track or self.auth.x_li_track or default
+
+    def _effective_csrf_token(self) -> str:
+        return (
+            self._runtime_csrf_token
+            or self.auth.csrf_token
+            or self.auth.jsessionid
+            or ""
+        )
 
     # ------------------------------------------------------------------
     # Shared helpers — send_message (upstream)
     # ------------------------------------------------------------------
 
     def _build_headers(self) -> dict[str, str]:
-        csrf_token = self.auth.jsessionid or ""
-        return {**_BASE_HEADERS, "csrf-token": csrf_token}
+        return {
+            **_BASE_HEADERS,
+            "x-li-track": self._effective_x_li_track(_BASE_HEADERS["x-li-track"]),
+            "csrf-token": self._effective_csrf_token(),
+        }
 
     def _get_cookies(self) -> dict[str, str]:
         cookies: dict[str, str] = {"li_at": self.auth.li_at}
@@ -402,21 +436,22 @@ class LinkedInProvider:
     def _build_graphql_headers(self) -> dict[str, str]:
         if not self.auth.jsessionid or not self.auth.jsessionid.strip():
             raise ValueError("JSESSIONID cookie required for Voyager API (CSRF)")
+        default_track = json.dumps({
+            "clientVersion": "1.13.42912",
+            "mpVersion": "1.13.42912",
+            "osName": "web",
+            "timezoneOffset": 0,
+            "deviceFormFactor": "DESKTOP",
+            "mpName": "voyager-web",
+        })
         return {
             "User-Agent": _BROWSER_USER_AGENT,
             "Accept": "application/graphql",
             "x-restli-protocol-version": "2.0.0",
-            "x-li-track": json.dumps({
-                "clientVersion": "1.13.42912",
-                "mpVersion": "1.13.42912",
-                "osName": "web",
-                "timezoneOffset": 0,
-                "deviceFormFactor": "DESKTOP",
-                "mpName": "voyager-web",
-            }),
+            "x-li-track": self._effective_x_li_track(default_track),
             "x-li-page-instance": "urn:li:page:d_flagship3_messaging",
             "x-li-lang": "en_US",
-            "csrf-token": self.auth.jsessionid,
+            "csrf-token": self._effective_csrf_token(),
             "referer": _MESSAGING_PAGE_URL,
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
@@ -450,7 +485,8 @@ class LinkedInProvider:
             "User-Agent": _BROWSER_USER_AGENT,
             "Accept": "application/vnd.linkedin.normalized+json+2.1",
             "x-restli-protocol-version": "2.0.0",
-            "csrf-token": self.auth.jsessionid or "",
+            "x-li-track": self._effective_x_li_track(_BASE_HEADERS["x-li-track"]),
+            "csrf-token": self._effective_csrf_token(),
         }
         cookies = self._build_basic_cookies()
         try:

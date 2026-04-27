@@ -356,6 +356,27 @@ async function testAC5b_manualSyncIncludesBearerToken() {
   }
 }
 
+async function testAC5c_manualSyncThreadsBrowserContext() {
+  console.log("\nAC5c: MANUAL_SYNC threads captured x_li_track and csrf_token into payload");
+  const env = buildEnv();
+  env.storage.accountId = 1;
+  env.storage.xLiTrack = '{"clientVersion":"1.13.42912"}';
+  env.storage.csrfToken = "ajax:abc123";
+  loadBackground(env);
+
+  const resp = await env.chrome.runtime.sendMessage({ type: "MANUAL_SYNC" });
+  assert(resp.ok === true, "sync response is ok");
+
+  const syncCall = env.fetchLog.find(f => f.url.includes("/sync"));
+  assert(!!syncCall, "POST /sync was called");
+  if (syncCall) {
+    const body = JSON.parse(syncCall.options.body);
+    assert(body.account_id === 1, "account_id passed to sync");
+    assert(body.x_li_track === '{"clientVersion":"1.13.42912"}', "x_li_track threaded into sync payload");
+    assert(body.csrf_token === "ajax:abc123", "csrf_token threaded into sync payload");
+  }
+}
+
 async function testAC6_manualRefresh() {
   console.log("\nAC6: MANUAL_REFRESH triggers cookie refresh");
   const env = buildEnv();
@@ -384,6 +405,7 @@ async function main() {
   await testAC5_manualSync();
   await testAC5c_manualSyncWithoutCapturedHeaders();
   await testAC5b_manualSyncIncludesBearerToken();
+  await testAC5c_manualSyncThreadsBrowserContext();
   await testAC6_manualRefresh();
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

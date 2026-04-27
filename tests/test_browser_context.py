@@ -195,6 +195,7 @@ class TestProviderHeaderPrecedence:
 
         class _FakeResp:
             status_code = 500  # terminate early; we only care about headers
+            headers: dict[str, str] = {}
 
             def json(self):  # pragma: no cover - not reached
                 return {}
@@ -209,7 +210,10 @@ class TestProviderHeaderPrecedence:
                 return False
 
         p._client = _FakeClient()
-        p._get_profile_id()
+        # Non-200 responses now raise RuntimeError from _get_profile_id; we
+        # only care that the captured headers were forwarded into /me.
+        with pytest.raises(RuntimeError):
+            p._get_profile_id()
         assert captured["headers"]["x-li-track"] == "FRESH_TRACK"
         assert captured["headers"]["csrf-token"] == "FRESH_CSRF"
 

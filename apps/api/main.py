@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from libs.core.cookies import cookies_to_account_auth, validate_li_at
 from libs.core.job_runner import run_send, run_sync, SendResult, SyncConfig, SyncResult
-from libs.core.models import AccountAuth, ProxyConfig
+from libs.core.models import AccountAuth, BrowserContext, ProxyConfig
 from libs.core.redaction import configure_logging, redact_for_log, redact_string
 from libs.core.storage import Storage
 from libs.providers.linkedin.provider import LinkedInProvider, MAX_MESSAGES_PER_PAGE
@@ -225,7 +225,11 @@ def sync_account(body: SyncIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    incoming_ctx = BrowserContext(x_li_track=body.x_li_track, csrf_token=body.csrf_token)
+    if not incoming_ctx.is_empty():
+        storage.update_browser_context(body.account_id, incoming_ctx)
+    browser_context = storage.get_browser_context(body.account_id)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id, browser_context=browser_context)
     sync_config = SyncConfig(
         delay_between_threads_s=body.delay_between_threads_s,
         delay_between_pages_s=body.delay_between_pages_s,
@@ -250,9 +254,12 @@ def sync_account(body: SyncIn):
             "rate_limited": result.rate_limited,
         }
     except PermissionError as exc:
+        detail = redact_string(str(exc))
+        if "POST /accounts/refresh" not in detail:
+            detail = "LinkedIn session expired — re-authenticate via POST /accounts/refresh"
         raise HTTPException(
             status_code=401,
-            detail="LinkedIn session expired — re-authenticate via POST /accounts/refresh",
+            detail=detail,
         ) from exc
     except NotImplementedError:
         raise HTTPException(
@@ -273,7 +280,11 @@ def send_message(body: SendIn):
         proxy = storage.get_account_proxy(body.account_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=redact_string(str(e))) from e
-    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id)
+    incoming_ctx = BrowserContext(x_li_track=body.x_li_track, csrf_token=body.csrf_token)
+    if not incoming_ctx.is_empty():
+        storage.update_browser_context(body.account_id, incoming_ctx)
+    browser_context = storage.get_browser_context(body.account_id)
+    provider = LinkedInProvider(auth=auth, proxy=proxy, account_id=body.account_id, browser_context=browser_context)
     try:
         result: SendResult = run_send(
             account_id=body.account_id,
